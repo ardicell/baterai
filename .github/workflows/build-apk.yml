@@ -30,6 +30,20 @@ jobs:
         run: |
           # Root project files
           cat > settings.gradle << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
           include ':app-server'
           include ':app-client'
           EOF
@@ -275,6 +289,7 @@ jobs:
 
           cat > app-server/src/main/kotlin/com/example/server/DataServer.kt << 'EOF'
           package com.example.server
+          import android.net.TrafficStats
           import fi.iki.elonen.NanoHTTPD
           import org.json.JSONArray
           import org.json.JSONObject
@@ -306,10 +321,22 @@ jobs:
                   synchronized(NotificationCollectorService.notifications) {
                       for (n in NotificationCollectorService.notifications) notifArray.put(JSONObject(n))
                   }
+
+                  // Data usage (seluler)
+                  val mobileRx = TrafficStats.getMobileRxBytes()
+                  val mobileTx = TrafficStats.getMobileTxBytes()
+                  val dataUsage = JSONObject().apply {
+                      put("rx_bytes", mobileRx)
+                      put("tx_bytes", mobileTx)
+                      put("rx_mb", mobileRx / (1024.0 * 1024.0))
+                      put("tx_mb", mobileTx / (1024.0 * 1024.0))
+                  }
+
                   val root = JSONObject().apply {
                       put("battery", battery)
                       put("sms", sms)
                       put("notifications", notifArray)
+                      put("data_usage", dataUsage)
                       put("timestamp", System.currentTimeMillis())
                       val cpuTemp = getCpuTemperature()
                       if (cpuTemp != null) put("cpu_temperature", cpuTemp)
@@ -464,10 +491,20 @@ jobs:
               <TextView android:id="@+id/tvTemperature" android:text="Suhu: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
               <TextView android:id="@+id/tvVoltage" android:text="Tegangan: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
               <TextView android:id="@+id/tvCpuTemp" android:text="Suhu CPU: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+
               <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
+
+              <TextView android:text="📊 Kuota Data Seluler (J2 Prime)" android:textStyle="bold" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvDataRx" android:text="Download: -- MB" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvDataTx" android:text="Upload: -- MB" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+
+              <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
+
               <TextView android:id="@+id/tvSmsUnread" android:text="SMS belum dibaca: 0" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
               <TextView android:id="@+id/tvLastSms" android:text="Tidak ada SMS baru" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+
               <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
+
               <TextView android:text="Notifikasi Terakhir" android:textStyle="bold" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
               <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvNotifications"
                   android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
@@ -518,6 +555,8 @@ jobs:
               private lateinit var tvTemperature: TextView
               private lateinit var tvVoltage: TextView
               private lateinit var tvCpuTemp: TextView
+              private lateinit var tvDataRx: TextView
+              private lateinit var tvDataTx: TextView
               private lateinit var tvSmsUnread: TextView
               private lateinit var tvLastSms: TextView
               private val handler = Handler(Looper.getMainLooper())
@@ -531,6 +570,8 @@ jobs:
                   tvTemperature = findViewById(R.id.tvTemperature)
                   tvVoltage = findViewById(R.id.tvVoltage)
                   tvCpuTemp = findViewById(R.id.tvCpuTemp)
+                  tvDataRx = findViewById(R.id.tvDataRx)
+                  tvDataTx = findViewById(R.id.tvDataTx)
                   tvSmsUnread = findViewById(R.id.tvSmsUnread)
                   tvLastSms = findViewById(R.id.tvLastSms)
                   val rv = findViewById<RecyclerView>(R.id.rvNotifications)
@@ -558,6 +599,8 @@ jobs:
                           val battery = root.getJSONObject("battery")
                           val sms = root.getJSONObject("sms")
                           val notifs = root.getJSONArray("notifications")
+                          val dataUsage = root.optJSONObject("data_usage")
+
                           runOnUiThread {
                               tvBatteryLevel.text = "Baterai: ${battery.getInt("level")}%"
                               tvChargerStatus.text = "Charger: ${battery.getString("plugged")} ${if(battery.getBoolean("charging")) "(mengisi)" else ""}"
@@ -566,6 +609,17 @@ jobs:
                               tvTemperature.text = "Suhu baterai: ${battery.getDouble("temperature")}°C"
                               tvVoltage.text = "Tegangan: ${battery.getInt("voltage")} mV"
                               tvCpuTemp.text = if (root.has("cpu_temperature")) "Suhu CPU: ${root.getDouble("cpu_temperature")}°C" else "Suhu CPU: --"
+
+                              if (dataUsage != null) {
+                                  val rxMB = String.format("%.2f", dataUsage.getDouble("rx_mb"))
+                                  val txMB = String.format("%.2f", dataUsage.getDouble("tx_mb"))
+                                  tvDataRx.text = "Download: $rxMB MB"
+                                  tvDataTx.text = "Upload: $txMB MB"
+                              } else {
+                                  tvDataRx.text = "Download: -- MB"
+                                  tvDataTx.text = "Upload: -- MB"
+                              }
+
                               tvSmsUnread.text = "SMS belum dibaca: ${sms.getInt("unread_count")}"
                               tvLastSms.text = if (sms.getString("last_sender").isNotEmpty()) "${sms.getString("last_sender")}: ${sms.getString("last_body")}" else "Tidak ada SMS baru"
                               val items = mutableListOf<Map<String, String>>()
