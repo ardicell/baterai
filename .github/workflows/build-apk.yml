@@ -26,12 +26,17 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      - name: Create Project Structure
+      - name: Create Clean Project
         run: |
-          # Bersihkan semua file gradle dari repo
-          rm -rf .gradle build settings.gradle* build.gradle* gradle.properties gradle/ app-server/ app-client/
+          # Hapus total file & folder gradle bawaan repo
+          rm -f build.gradle
+          rm -f settings.gradle
+          rm -f gradle.properties
+          rm -rf app-server
+          rm -rf app-client
+          rm -rf .gradle
 
-          # Root build.gradle (dengan buildscript agar plugin pasti tersedia)
+          # Root build.gradle HANYA buildscript, tanpa plugins block
           cat > build.gradle << 'EOF'
           buildscript {
               repositories {
@@ -43,13 +48,9 @@ jobs:
                   classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22'
               }
           }
-          plugins {
-              id 'com.android.application' version '8.2.2' apply false
-              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
-          }
           EOF
 
-          # settings.gradle (cukup include)
+          # settings.gradle sederhana
           cat > settings.gradle << 'EOF'
           include ':app-server'
           EOF
@@ -60,7 +61,7 @@ jobs:
           org.gradle.jvmargs=-Xmx2048m
           EOF
 
-          # ==================== APP SERVER ====================
+          # ========== APP SERVER ==========
           mkdir -p app-server/src/main/kotlin/com/example/server
           mkdir -p app-server/src/main/res/layout
           mkdir -p app-server/src/main/res/drawable
