@@ -1,0 +1,629 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
+      - name: Create Project Structure
+        run: |
+          # Root project files
+          cat > settings.gradle << 'EOF'
+          include ':app-server'
+          include ':app-client'
+          EOF
+
+          cat > build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m
+          EOF
+
+          # ==================== APP SERVER ====================
+          mkdir -p app-server/src/main/kotlin/com/example/server
+          mkdir -p app-server/src/main/res/layout
+          mkdir -p app-server/src/main/res/drawable
+
+          # build.gradle
+          cat > app-server/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'kotlin-android'
+          }
+          android {
+              namespace 'com.example.server'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.example.server"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  debug { minifyEnabled false }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+              kotlinOptions { jvmTarget = '1.8' }
+          }
+          dependencies {
+              implementation 'org.nanohttpd:nanohttpd:2.3.1'
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
+          EOF
+
+          # AndroidManifest.xml
+          cat > app-server/src/main/AndroidManifest.xml << 'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.READ_SMS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="Server Monitor"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".ServerService"
+                      android:foregroundServiceType="dataSync" android:exported="false" />
+                  <service android:name=".NotificationCollectorService"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+                  <receiver android:name=".BatteryReceiver" android:exported="true" />
+              </application>
+          </manifest>
+          EOF
+
+          # ic_launcher (vector)
+          cat > app-server/src/main/res/drawable/ic_launcher.xml << 'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp" android:height="48dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FF9800" android:pathData="M12,2L2,7l10,5 10,-5 -10,-5zM2,17l10,5 10,-5M2,12l10,5 10,-5"/>
+          </vector>
+          EOF
+
+          # activity_main.xml
+          cat > app-server/src/main/res/layout/activity_main.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:gravity="center" android:orientation="vertical">
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="Server Monitor Aktif" android:textSize="18sp" />
+          </LinearLayout>
+          EOF
+
+          # Kotlin files
+          cat > app-server/src/main/kotlin/com/example/server/MainActivity.kt << 'EOF'
+          package com.example.server
+          import android.Manifest
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+          class MainActivity : AppCompatActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED)
+                      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_SMS), 100)
+                  if (!isNotificationListenerEnabled())
+                      startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      val pm = getSystemService(POWER_SERVICE) as PowerManager
+                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                          val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+                          startActivity(i)
+                      }
+                  }
+                  val serviceIntent = Intent(this, ServerService::class.java)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(serviceIntent)
+                  else startService(serviceIntent)
+                  Toast.makeText(this, "Server berjalan", Toast.LENGTH_SHORT).show()
+                  finish()
+              }
+              private fun isNotificationListenerEnabled(): Boolean {
+                  val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+                  return flat?.contains(packageName) == true
+              }
+          }
+          EOF
+
+          cat > app-server/src/main/kotlin/com/example/server/BatteryReceiver.kt << 'EOF'
+          package com.example.server
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.os.BatteryManager
+          object BatteryData {
+              var level: Int = 0
+              var plugged: String = "None"
+              var charging: Boolean = false
+              var voltage: Int = 0
+              var temperature: Float = 0f
+              var current: Int = -1
+              var health: String = "Unknown"
+          }
+          class BatteryReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 0)
+                  val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                  BatteryData.level = (level * 100) / scale
+                  val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                  BatteryData.charging = status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+                  val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                  BatteryData.plugged = when (plugged) {
+                      BatteryManager.BATTERY_PLUGGED_AC -> "AC"
+                      BatteryManager.BATTERY_PLUGGED_USB -> "USB"
+                      BatteryManager.BATTERY_PLUGGED_WIRELESS -> "Wireless"
+                      else -> "None"
+                  }
+                  BatteryData.voltage = intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)
+                  BatteryData.temperature = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10f
+                  BatteryData.health = when (intent.getIntExtra(BatteryManager.EXTRA_HEALTH, 0)) {
+                      BatteryManager.BATTERY_HEALTH_COLD -> "Cold"
+                      BatteryManager.BATTERY_HEALTH_DEAD -> "Dead"
+                      BatteryManager.BATTERY_HEALTH_GOOD -> "Good"
+                      BatteryManager.BATTERY_HEALTH_OVERHEAT -> "Overheat"
+                      BatteryManager.BATTERY_HEALTH_OVER_VOLTAGE -> "Over Voltage"
+                      else -> "Unknown"
+                  }
+                  BatteryData.current = intent.getIntExtra("current_now", -1)
+                  if (BatteryData.current == -1) BatteryData.current = intent.getIntExtra("current_avg", -1)
+              }
+          }
+          EOF
+
+          cat > app-server/src/main/kotlin/com/example/server/NotificationCollectorService.kt << 'EOF'
+          package com.example.server
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+          class NotificationCollectorService : NotificationListenerService() {
+              companion object {
+                  val notifications = mutableListOf<Map<String, Any>>()
+                  const val MAX = 10
+              }
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  val extras = sbn.notification.extras
+                  val title = extras.getString("android.title") ?: ""
+                  val text = extras.getString("android.text") ?: ""
+                  val map = mapOf("app" to sbn.packageName, "title" to title, "text" to text, "time" to System.currentTimeMillis())
+                  synchronized(notifications) {
+                      notifications.add(0, map)
+                      if (notifications.size > MAX) notifications.removeAt(notifications.size - 1)
+                  }
+              }
+              override fun onNotificationRemoved(sbn: StatusBarNotification?) {}
+          }
+          EOF
+
+          cat > app-server/src/main/kotlin/com/example/server/SmsHelper.kt << 'EOF'
+          package com.example.server
+          import android.Manifest
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import androidx.core.content.ContextCompat
+          object SmsData {
+              var unreadCount: Int = 0
+              var lastSender: String = ""
+              var lastBody: String = ""
+          }
+          fun loadSmsData(context: Context) {
+              if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return
+              val cursor = context.contentResolver.query(Uri.parse("content://sms/inbox"), arrayOf("address", "body", "read", "date"), "read = 0", null, "date DESC")
+              cursor?.use {
+                  SmsData.unreadCount = it.count
+                  if (it.moveToFirst()) {
+                      SmsData.lastSender = it.getString(it.getColumnIndexOrThrow("address"))
+                      SmsData.lastBody = it.getString(it.getColumnIndexOrThrow("body"))
+                  }
+              }
+          }
+          EOF
+
+          cat > app-server/src/main/kotlin/com/example/server/DataServer.kt << 'EOF'
+          package com.example.server
+          import fi.iki.elonen.NanoHTTPD
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.File
+          class DataServer(port: Int) : NanoHTTPD(port) {
+              override fun serve(session: IHTTPSession): Response {
+                  return if (session.uri == "/status") {
+                      newFixedLengthResponse(Response.Status.OK, "application/json", buildStatusJson())
+                  } else {
+                      newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+                  }
+              }
+              private fun buildStatusJson(): String {
+                  val battery = JSONObject().apply {
+                      put("level", BatteryData.level)
+                      put("plugged", BatteryData.plugged)
+                      put("charging", BatteryData.charging)
+                      put("voltage", BatteryData.voltage)
+                      put("temperature", BatteryData.temperature)
+                      put("current", BatteryData.current)
+                      put("health", BatteryData.health)
+                  }
+                  val sms = JSONObject().apply {
+                      put("unread_count", SmsData.unreadCount)
+                      put("last_sender", SmsData.lastSender)
+                      put("last_body", SmsData.lastBody)
+                  }
+                  val notifArray = JSONArray()
+                  synchronized(NotificationCollectorService.notifications) {
+                      for (n in NotificationCollectorService.notifications) notifArray.put(JSONObject(n))
+                  }
+                  val root = JSONObject().apply {
+                      put("battery", battery)
+                      put("sms", sms)
+                      put("notifications", notifArray)
+                      put("timestamp", System.currentTimeMillis())
+                      val cpuTemp = getCpuTemperature()
+                      if (cpuTemp != null) put("cpu_temperature", cpuTemp)
+                      val current = if (BatteryData.current <= 0) getChargeCurrentFromFile() else BatteryData.current
+                      if (current > 0) put("charge_current", current)
+                  }
+                  return root.toString()
+              }
+              private fun getCpuTemperature(): Float? {
+                  return try {
+                      val f = File("/sys/devices/virtual/thermal/thermal_zone0/temp")
+                      if (f.exists()) f.readText().trim().toFloat() / 1000f else null
+                  } catch (e: Exception) { null }
+              }
+              private fun getChargeCurrentFromFile(): Int {
+                  for (path in listOf(
+                      "/sys/class/power_supply/battery/current_now",
+                      "/sys/class/power_supply/battery/batt_current",
+                      "/sys/class/power_supply/battery/current_avg"
+                  )) {
+                      try {
+                          val f = File(path)
+                          if (f.exists()) return Math.abs(f.readText().trim().toInt()) / 1000
+                      } catch (_: Exception) {}
+                  }
+                  return -1
+              }
+          }
+          EOF
+
+          cat > app-server/src/main/kotlin/com/example/server/ServerService.kt << 'EOF'
+          package com.example.server
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import androidx.core.app.NotificationCompat
+          class ServerService : android.app.Service() {
+              private lateinit var server: DataServer
+              private lateinit var batteryReceiver: BatteryReceiver
+              private val handler = Handler(Looper.getMainLooper())
+              override fun onCreate() {
+                  super.onCreate()
+                  createNotificationChannel()
+                  startForeground(1, NotificationCompat.Builder(this, "server_channel")
+                      .setContentTitle("Server Monitor Aktif")
+                      .setContentText("Data disediakan via WiFi")
+                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                      .setOngoing(true)
+                      .build())
+                  batteryReceiver = BatteryReceiver()
+                  registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                  server = DataServer(8080)
+                  try { server.start() } catch (e: Exception) { e.printStackTrace() }
+                  handler.post(updateSmsRunnable)
+              }
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+              override fun onDestroy() {
+                  server.stop()
+                  unregisterReceiver(batteryReceiver)
+                  handler.removeCallbacks(updateSmsRunnable)
+                  super.onDestroy()
+              }
+              override fun onBind(intent: Intent?): IBinder? = null
+              private val updateSmsRunnable = object : Runnable {
+                  override fun run() {
+                      loadSmsData(this@ServerService)
+                      handler.postDelayed(this, 30_000)
+                  }
+              }
+              private fun createNotificationChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      getSystemService(NotificationManager::class.java)
+                          .createNotificationChannel(NotificationChannel("server_channel", "Server Service", NotificationManager.IMPORTANCE_LOW))
+                  }
+              }
+          }
+          EOF
+
+          # ==================== APP CLIENT ====================
+          mkdir -p app-client/src/main/kotlin/com/example/client
+          mkdir -p app-client/src/main/res/layout
+          mkdir -p app-client/src/main/res/drawable
+
+          cat > app-client/build.gradle << 'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'kotlin-android'
+          }
+          android {
+              namespace 'com.example.client'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.example.client"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes { debug { minifyEnabled false } }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+              kotlinOptions { jvmTarget = '1.8' }
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.recyclerview:recyclerview:1.3.2'
+          }
+          EOF
+
+          cat > app-client/src/main/AndroidManifest.xml << 'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="Client Monitor"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          # ic_launcher client (vector)
+          cat > app-client/src/main/res/drawable/ic_launcher.xml << 'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp" android:height="48dp" android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#4CAF50" android:pathData="M12,2L2,7l10,5 10,-5 -10,-5zM2,17l10,5 10,-5M2,12l10,5 10,-5"/>
+          </vector>
+          EOF
+
+          cat > app-client/src/main/res/layout/activity_main.xml << 'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="16dp">
+              <TextView android:id="@+id/tvBatteryLevel" android:text="Baterai: --%" android:textSize="20sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvChargerStatus" android:text="Charger: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvChargingSpeed" android:text="Kecepatan: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvTemperature" android:text="Suhu: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvVoltage" android:text="Tegangan: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvCpuTemp" android:text="Suhu CPU: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
+              <TextView android:id="@+id/tvSmsUnread" android:text="SMS belum dibaca: 0" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvLastSms" android:text="Tidak ada SMS baru" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
+              <TextView android:text="Notifikasi Terakhir" android:textStyle="bold" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvNotifications"
+                  android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
+          </LinearLayout>
+          EOF
+
+          cat > app-client/src/main/res/layout/item_notification.xml << 'EOF'
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="wrap_content"
+              android:orientation="vertical" android:padding="8dp"
+              android:background="@drawable/bg_notif_item">
+              <TextView android:id="@+id/tvNotifApp" android:textStyle="bold" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvNotifTitle" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvNotifText" android:textSize="13sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+              <TextView android:id="@+id/tvNotifTime" android:textSize="11sp" android:textColor="#888" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+          </LinearLayout>
+          EOF
+
+          cat > app-client/src/main/res/drawable/bg_notif_item.xml << 'EOF'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <stroke android:width="1dp" android:color="#cccccc" />
+              <corners android:radius="8dp" />
+              <padding android:left="8dp" android:right="8dp" android:top="4dp" android:bottom="4dp" />
+          </shape>
+          EOF
+
+          # Kotlin client
+          cat > app-client/src/main/kotlin/com/example/client/MainActivity.kt << 'EOF'
+          package com.example.client
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.recyclerview.widget.LinearLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.*
+          import kotlin.concurrent.thread
+          class MainActivity : AppCompatActivity() {
+              private lateinit var tvBatteryLevel: TextView
+              private lateinit var tvChargerStatus: TextView
+              private lateinit var tvChargingSpeed: TextView
+              private lateinit var tvTemperature: TextView
+              private lateinit var tvVoltage: TextView
+              private lateinit var tvCpuTemp: TextView
+              private lateinit var tvSmsUnread: TextView
+              private lateinit var tvLastSms: TextView
+              private val handler = Handler(Looper.getMainLooper())
+              private lateinit var adapter: NotificationAdapter
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+                  tvBatteryLevel = findViewById(R.id.tvBatteryLevel)
+                  tvChargerStatus = findViewById(R.id.tvChargerStatus)
+                  tvChargingSpeed = findViewById(R.id.tvChargingSpeed)
+                  tvTemperature = findViewById(R.id.tvTemperature)
+                  tvVoltage = findViewById(R.id.tvVoltage)
+                  tvCpuTemp = findViewById(R.id.tvCpuTemp)
+                  tvSmsUnread = findViewById(R.id.tvSmsUnread)
+                  tvLastSms = findViewById(R.id.tvLastSms)
+                  val rv = findViewById<RecyclerView>(R.id.rvNotifications)
+                  adapter = NotificationAdapter()
+                  rv.layoutManager = LinearLayoutManager(this)
+                  rv.adapter = adapter
+                  handler.post(updateRunnable)
+              }
+              private val updateRunnable = object : Runnable {
+                  override fun run() {
+                      fetchData()
+                      handler.postDelayed(this, 5000)
+                  }
+              }
+              private fun fetchData() {
+                  thread {
+                      try {
+                          val url = URL("http://192.168.43.1:8080/status")
+                          val conn = url.openConnection() as HttpURLConnection
+                          conn.connectTimeout = 3000
+                          conn.readTimeout = 3000
+                          val json = conn.inputStream.bufferedReader().readText()
+                          conn.disconnect()
+                          val root = JSONObject(json)
+                          val battery = root.getJSONObject("battery")
+                          val sms = root.getJSONObject("sms")
+                          val notifs = root.getJSONArray("notifications")
+                          runOnUiThread {
+                              tvBatteryLevel.text = "Baterai: ${battery.getInt("level")}%"
+                              tvChargerStatus.text = "Charger: ${battery.getString("plugged")} ${if(battery.getBoolean("charging")) "(mengisi)" else ""}"
+                              val cur = battery.optInt("charge_current", -1)
+                              tvChargingSpeed.text = if (cur > 0) "Arus: ${cur} mA" else "Kecepatan tidak diketahui"
+                              tvTemperature.text = "Suhu baterai: ${battery.getDouble("temperature")}°C"
+                              tvVoltage.text = "Tegangan: ${battery.getInt("voltage")} mV"
+                              tvCpuTemp.text = if (root.has("cpu_temperature")) "Suhu CPU: ${root.getDouble("cpu_temperature")}°C" else "Suhu CPU: --"
+                              tvSmsUnread.text = "SMS belum dibaca: ${sms.getInt("unread_count")}"
+                              tvLastSms.text = if (sms.getString("last_sender").isNotEmpty()) "${sms.getString("last_sender")}: ${sms.getString("last_body")}" else "Tidak ada SMS baru"
+                              val items = mutableListOf<Map<String, String>>()
+                              for (i in 0 until notifs.length()) {
+                                  val n = notifs.getJSONObject(i)
+                                  items.add(mapOf(
+                                      "app" to n.getString("app"),
+                                      "title" to n.getString("title"),
+                                      "text" to n.getString("text"),
+                                      "time" to SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(n.getLong("time")))
+                                  ))
+                              }
+                              adapter.submitList(items)
+                          }
+                      } catch (e: Exception) {
+                          runOnUiThread { Toast.makeText(this@MainActivity, "Gagal terhubung ke server", Toast.LENGTH_SHORT).show() }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat > app-client/src/main/kotlin/com/example/client/NotificationAdapter.kt << 'EOF'
+          package com.example.client
+          import android.view.LayoutInflater
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.TextView
+          import androidx.recyclerview.widget.RecyclerView
+          class NotificationAdapter : RecyclerView.Adapter<NotificationAdapter.ViewHolder>() {
+              private var items = listOf<Map<String, String>>()
+              fun submitList(list: List<Map<String, String>>) { items = list; notifyDataSetChanged() }
+              class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+                  val app: TextView = view.findViewById(R.id.tvNotifApp)
+                  val title: TextView = view.findViewById(R.id.tvNotifTitle)
+                  val text: TextView = view.findViewById(R.id.tvNotifText)
+                  val time: TextView = view.findViewById(R.id.tvNotifTime)
+              }
+              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+                  ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_notification, parent, false))
+              override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+                  val item = items[position]
+                  holder.app.text = item["app"]
+                  holder.title.text = item["title"]
+                  holder.text.text = item["text"]
+                  holder.time.text = item["time"]
+              }
+              override fun getItemCount() = items.size
+          }
+          EOF
+
+      - name: Build APKs
+        run: gradle :app-server:assembleDebug :app-client:assembleDebug
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: |
+            app-server/build/outputs/apk/debug/app-server-debug.apk
+            app-client/build/outputs/apk/debug/app-client-debug.apk
