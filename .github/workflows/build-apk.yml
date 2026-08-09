@@ -28,6 +28,10 @@ jobs:
 
       - name: Create Project Structure
         run: |
+          # Hapus file lama jika ada
+          rm -f settings.gradle build.gradle gradle.properties
+          rm -rf app-server app-client
+
           # Root project files
           cat > settings.gradle << 'EOF'
           pluginManagement {
@@ -45,7 +49,6 @@ jobs:
               }
           }
           include ':app-server'
-          include ':app-client'
           EOF
 
           cat > build.gradle << 'EOF'
@@ -296,12 +299,112 @@ jobs:
           import java.io.File
           class DataServer(port: Int) : NanoHTTPD(port) {
               override fun serve(session: IHTTPSession): Response {
-                  return if (session.uri == "/status") {
-                      newFixedLengthResponse(Response.Status.OK, "application/json", buildStatusJson())
-                  } else {
-                      newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+                  return when (session.uri) {
+                      "/", "/index.html" -> serveDashboard()
+                      "/status" -> newFixedLengthResponse(Response.Status.OK, "application/json", buildStatusJson())
+                      else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
                   }
               }
+
+              private fun serveDashboard(): Response {
+                  val html = """
+                  <!DOCTYPE html>
+                  <html><head>
+                  <meta charset='utf-8'>
+                  <meta name='viewport' content='width=device-width, initial-scale=1'>
+                  <title>J2 Prime Monitor</title>
+                  <style>
+                      body { font-family: sans-serif; padding: 16px; background: #f5f5f5; color: #333; }
+                      .card { background: white; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                      .title { font-size: 18px; font-weight: bold; margin-bottom: 8px; }
+                      .row { display: flex; justify-content: space-between; }
+                      .danger { color: #e53935; }
+                      .green { color: #388e3c; }
+                      .orange { color: #f57c00; }
+                      .small { font-size: 12px; color: #888; }
+                      #battery-bar { width: 100%; background: #e0e0e0; border-radius: 8px; height: 20px; margin: 8px 0; }
+                      #battery-fill { height: 100%; border-radius: 8px; background: #4caf50; transition: width 1s; }
+                      table { width: 100%; border-collapse: collapse; }
+                      td { padding: 4px 8px; border-bottom: 1px solid #eee; }
+                  </style>
+                  </head><body>
+                  <h2>📱 J2 Prime Monitor</h2>
+                  <div class='card'>
+                      <div class='title'>🔋 Baterai</div>
+                      <div id='battery-bar'><div id='battery-fill' style='width:0%'></div></div>
+                      <div class='row'><span>Level:</span><strong id='bat-level'>--</strong></div>
+                      <div class='row'><span>Status:</span><strong id='bat-status'>--</strong></div>
+                      <div class='row'><span>Charger:</span><strong id='bat-plugged'>--</strong></div>
+                      <div class='row'><span>Kecepatan:</span><strong id='bat-current'>--</strong></div>
+                      <div class='row'><span>Tegangan:</span><strong id='bat-voltage'>--</strong></div>
+                      <div class='row'><span>Suhu Baterai:</span><strong id='bat-temp'>--</strong></div>
+                      <div class='row'><span>Suhu CPU:</span><strong id='cpu-temp'>--</strong></div>
+                  </div>
+                  <div class='card'>
+                      <div class='title'>📊 Kuota Data Seluler</div>
+                      <div class='row'><span>Download:</span><strong id='data-rx'>--</strong></div>
+                      <div class='row'><span>Upload:</span><strong id='data-tx'>--</strong></div>
+                  </div>
+                  <div class='card'>
+                      <div class='title'>💬 SMS Terakhir</div>
+                      <div><strong id='sms-count'>--</strong> belum dibaca</div>
+                      <div id='sms-detail' class='small'>--</div>
+                  </div>
+                  <div class='card'>
+                      <div class='title'>🔔 Notifikasi</div>
+                      <div id='notif-list'>Tidak ada notifikasi.</div>
+                  </div>
+                  <div class='small' style='text-align:center;margin-top:16px;'>Auto-refresh setiap 5 detik</div>
+                  <script>
+                      async function fetchData() {
+                          try {
+                              const res = await fetch('/status');
+                              const data = await res.json();
+                              const bat = data.battery;
+                              document.getElementById('bat-level').textContent = bat.level + '%';
+                              document.getElementById('bat-status').textContent = bat.charging ? 'Mengisi' : 'Tidak mengisi';
+                              document.getElementById('bat-plugged').textContent = bat.plugged;
+                              document.getElementById('bat-current').textContent = data.charge_current ? data.charge_current + ' mA' : 'Tidak diketahui';
+                              document.getElementById('bat-voltage').textContent = (bat.voltage/1000).toFixed(2) + ' V';
+                              document.getElementById('bat-temp').textContent = bat.temperature + '°C';
+                              document.getElementById('cpu-temp').textContent = data.cpu_temperature ? data.cpu_temperature + '°C' : 'Tidak tersedia';
+                              document.getElementById('battery-fill').style.width = bat.level + '%';
+                              if (bat.level < 20) document.getElementById('battery-fill').style.background = '#e53935';
+                              else document.getElementById('battery-fill').style.background = '#4caf50';
+
+                              if (data.data_usage) {
+                                  document.getElementById('data-rx').textContent = data.data_usage.rx_mb.toFixed(2) + ' MB';
+                                  document.getElementById('data-tx').textContent = data.data_usage.tx_mb.toFixed(2) + ' MB';
+                              }
+
+                              document.getElementById('sms-count').textContent = data.sms.unread_count;
+                              if (data.sms.last_sender) {
+                                  document.getElementById('sms-detail').textContent = data.sms.last_sender + ': ' + data.sms.last_body;
+                              } else {
+                                  document.getElementById('sms-detail').textContent = 'Tidak ada SMS baru';
+                              }
+
+                              const notifs = data.notifications;
+                              let html = '';
+                              if (notifs.length === 0) html = 'Tidak ada notifikasi.';
+                              else {
+                                  notifs.forEach(n => {
+                                      html += `<div style='margin-bottom:8px;'><strong>${n.app}</strong><br>${n.title}<br><span class='small'>${new Date(n.time).toLocaleTimeString()}</span></div>`;
+                                  });
+                              }
+                              document.getElementById('notif-list').innerHTML = html;
+                          } catch(e) {
+                              console.error(e);
+                          }
+                      }
+                      fetchData();
+                      setInterval(fetchData, 5000);
+                  </script>
+                  </body></html>
+                  """.trimIndent()
+                  return newFixedLengthResponse(Response.Status.OK, "text/html", html)
+              }
+
               private fun buildStatusJson(): String {
                   val battery = JSONObject().apply {
                       put("level", BatteryData.level)
@@ -322,7 +425,6 @@ jobs:
                       for (n in NotificationCollectorService.notifications) notifArray.put(JSONObject(n))
                   }
 
-                  // Data usage (seluler)
                   val mobileRx = TrafficStats.getMobileRxBytes()
                   val mobileTx = TrafficStats.getMobileTxBytes()
                   val dataUsage = JSONObject().apply {
@@ -345,12 +447,14 @@ jobs:
                   }
                   return root.toString()
               }
+
               private fun getCpuTemperature(): Float? {
                   return try {
                       val f = File("/sys/devices/virtual/thermal/thermal_zone0/temp")
                       if (f.exists()) f.readText().trim().toFloat() / 1000f else null
                   } catch (e: Exception) { null }
               }
+
               private fun getChargeCurrentFromFile(): Int {
                   for (path in listOf(
                       "/sys/class/power_supply/battery/current_now",
@@ -420,264 +524,11 @@ jobs:
           }
           EOF
 
-          # ==================== APP CLIENT ====================
-          mkdir -p app-client/src/main/kotlin/com/example/client
-          mkdir -p app-client/src/main/res/layout
-          mkdir -p app-client/src/main/res/drawable
+      - name: Build APK
+        run: gradle :app-server:assembleDebug
 
-          cat > app-client/build.gradle << 'EOF'
-          plugins {
-              id 'com.android.application'
-              id 'kotlin-android'
-          }
-          android {
-              namespace 'com.example.client'
-              compileSdk 34
-              defaultConfig {
-                  applicationId "com.example.client"
-                  minSdk 21
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              buildTypes { debug { minifyEnabled false } }
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_1_8
-                  targetCompatibility JavaVersion.VERSION_1_8
-              }
-              kotlinOptions { jvmTarget = '1.8' }
-          }
-          dependencies {
-              implementation 'androidx.core:core-ktx:1.12.0'
-              implementation 'androidx.appcompat:appcompat:1.6.1'
-              implementation 'androidx.recyclerview:recyclerview:1.3.2'
-          }
-          EOF
-
-          cat > app-client/src/main/AndroidManifest.xml << 'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET" />
-              <application
-                  android:allowBackup="true"
-                  android:icon="@drawable/ic_launcher"
-                  android:label="Client Monitor"
-                  android:supportsRtl="true"
-                  android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
-                  <activity android:name=".MainActivity" android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          # ic_launcher client (vector)
-          cat > app-client/src/main/res/drawable/ic_launcher.xml << 'EOF'
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="48dp" android:height="48dp" android:viewportWidth="24" android:viewportHeight="24">
-              <path android:fillColor="#4CAF50" android:pathData="M12,2L2,7l10,5 10,-5 -10,-5zM2,17l10,5 10,-5M2,12l10,5 10,-5"/>
-          </vector>
-          EOF
-
-          cat > app-client/src/main/res/layout/activity_main.xml << 'EOF'
-          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:layout_width="match_parent" android:layout_height="match_parent"
-              android:orientation="vertical" android:padding="16dp">
-              <TextView android:id="@+id/tvBatteryLevel" android:text="Baterai: --%" android:textSize="20sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvChargerStatus" android:text="Charger: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvChargingSpeed" android:text="Kecepatan: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvTemperature" android:text="Suhu: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvVoltage" android:text="Tegangan: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvCpuTemp" android:text="Suhu CPU: --" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-
-              <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
-
-              <TextView android:text="📊 Kuota Data Seluler (J2 Prime)" android:textStyle="bold" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvDataRx" android:text="Download: -- MB" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvDataTx" android:text="Upload: -- MB" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-
-              <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
-
-              <TextView android:id="@+id/tvSmsUnread" android:text="SMS belum dibaca: 0" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvLastSms" android:text="Tidak ada SMS baru" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-
-              <View android:layout_height="1dp" android:background="#ccc" android:layout_marginVertical="8dp" android:layout_width="match_parent" />
-
-              <TextView android:text="Notifikasi Terakhir" android:textStyle="bold" android:textSize="16sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <androidx.recyclerview.widget.RecyclerView android:id="@+id/rvNotifications"
-                  android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" />
-          </LinearLayout>
-          EOF
-
-          cat > app-client/src/main/res/layout/item_notification.xml << 'EOF'
-          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:layout_width="match_parent" android:layout_height="wrap_content"
-              android:orientation="vertical" android:padding="8dp"
-              android:background="@drawable/bg_notif_item">
-              <TextView android:id="@+id/tvNotifApp" android:textStyle="bold" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvNotifTitle" android:textSize="14sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvNotifText" android:textSize="13sp" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-              <TextView android:id="@+id/tvNotifTime" android:textSize="11sp" android:textColor="#888" android:layout_width="wrap_content" android:layout_height="wrap_content" />
-          </LinearLayout>
-          EOF
-
-          cat > app-client/src/main/res/drawable/bg_notif_item.xml << 'EOF'
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-              <stroke android:width="1dp" android:color="#cccccc" />
-              <corners android:radius="8dp" />
-              <padding android:left="8dp" android:right="8dp" android:top="4dp" android:bottom="4dp" />
-          </shape>
-          EOF
-
-          # Kotlin client
-          cat > app-client/src/main/kotlin/com/example/client/MainActivity.kt << 'EOF'
-          package com.example.client
-          import android.os.Bundle
-          import android.os.Handler
-          import android.os.Looper
-          import android.widget.TextView
-          import android.widget.Toast
-          import androidx.appcompat.app.AppCompatActivity
-          import androidx.recyclerview.widget.LinearLayoutManager
-          import androidx.recyclerview.widget.RecyclerView
-          import org.json.JSONObject
-          import java.net.HttpURLConnection
-          import java.net.URL
-          import java.text.SimpleDateFormat
-          import java.util.*
-          import kotlin.concurrent.thread
-          class MainActivity : AppCompatActivity() {
-              private lateinit var tvBatteryLevel: TextView
-              private lateinit var tvChargerStatus: TextView
-              private lateinit var tvChargingSpeed: TextView
-              private lateinit var tvTemperature: TextView
-              private lateinit var tvVoltage: TextView
-              private lateinit var tvCpuTemp: TextView
-              private lateinit var tvDataRx: TextView
-              private lateinit var tvDataTx: TextView
-              private lateinit var tvSmsUnread: TextView
-              private lateinit var tvLastSms: TextView
-              private val handler = Handler(Looper.getMainLooper())
-              private lateinit var adapter: NotificationAdapter
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  setContentView(R.layout.activity_main)
-                  tvBatteryLevel = findViewById(R.id.tvBatteryLevel)
-                  tvChargerStatus = findViewById(R.id.tvChargerStatus)
-                  tvChargingSpeed = findViewById(R.id.tvChargingSpeed)
-                  tvTemperature = findViewById(R.id.tvTemperature)
-                  tvVoltage = findViewById(R.id.tvVoltage)
-                  tvCpuTemp = findViewById(R.id.tvCpuTemp)
-                  tvDataRx = findViewById(R.id.tvDataRx)
-                  tvDataTx = findViewById(R.id.tvDataTx)
-                  tvSmsUnread = findViewById(R.id.tvSmsUnread)
-                  tvLastSms = findViewById(R.id.tvLastSms)
-                  val rv = findViewById<RecyclerView>(R.id.rvNotifications)
-                  adapter = NotificationAdapter()
-                  rv.layoutManager = LinearLayoutManager(this)
-                  rv.adapter = adapter
-                  handler.post(updateRunnable)
-              }
-              private val updateRunnable = object : Runnable {
-                  override fun run() {
-                      fetchData()
-                      handler.postDelayed(this, 5000)
-                  }
-              }
-              private fun fetchData() {
-                  thread {
-                      try {
-                          val url = URL("http://192.168.43.1:8080/status")
-                          val conn = url.openConnection() as HttpURLConnection
-                          conn.connectTimeout = 3000
-                          conn.readTimeout = 3000
-                          val json = conn.inputStream.bufferedReader().readText()
-                          conn.disconnect()
-                          val root = JSONObject(json)
-                          val battery = root.getJSONObject("battery")
-                          val sms = root.getJSONObject("sms")
-                          val notifs = root.getJSONArray("notifications")
-                          val dataUsage = root.optJSONObject("data_usage")
-
-                          runOnUiThread {
-                              tvBatteryLevel.text = "Baterai: ${battery.getInt("level")}%"
-                              tvChargerStatus.text = "Charger: ${battery.getString("plugged")} ${if(battery.getBoolean("charging")) "(mengisi)" else ""}"
-                              val cur = battery.optInt("charge_current", -1)
-                              tvChargingSpeed.text = if (cur > 0) "Arus: ${cur} mA" else "Kecepatan tidak diketahui"
-                              tvTemperature.text = "Suhu baterai: ${battery.getDouble("temperature")}°C"
-                              tvVoltage.text = "Tegangan: ${battery.getInt("voltage")} mV"
-                              tvCpuTemp.text = if (root.has("cpu_temperature")) "Suhu CPU: ${root.getDouble("cpu_temperature")}°C" else "Suhu CPU: --"
-
-                              if (dataUsage != null) {
-                                  val rxMB = String.format("%.2f", dataUsage.getDouble("rx_mb"))
-                                  val txMB = String.format("%.2f", dataUsage.getDouble("tx_mb"))
-                                  tvDataRx.text = "Download: $rxMB MB"
-                                  tvDataTx.text = "Upload: $txMB MB"
-                              } else {
-                                  tvDataRx.text = "Download: -- MB"
-                                  tvDataTx.text = "Upload: -- MB"
-                              }
-
-                              tvSmsUnread.text = "SMS belum dibaca: ${sms.getInt("unread_count")}"
-                              tvLastSms.text = if (sms.getString("last_sender").isNotEmpty()) "${sms.getString("last_sender")}: ${sms.getString("last_body")}" else "Tidak ada SMS baru"
-                              val items = mutableListOf<Map<String, String>>()
-                              for (i in 0 until notifs.length()) {
-                                  val n = notifs.getJSONObject(i)
-                                  items.add(mapOf(
-                                      "app" to n.getString("app"),
-                                      "title" to n.getString("title"),
-                                      "text" to n.getString("text"),
-                                      "time" to SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(n.getLong("time")))
-                                  ))
-                              }
-                              adapter.submitList(items)
-                          }
-                      } catch (e: Exception) {
-                          runOnUiThread { Toast.makeText(this@MainActivity, "Gagal terhubung ke server", Toast.LENGTH_SHORT).show() }
-                      }
-                  }
-              }
-          }
-          EOF
-
-          cat > app-client/src/main/kotlin/com/example/client/NotificationAdapter.kt << 'EOF'
-          package com.example.client
-          import android.view.LayoutInflater
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.TextView
-          import androidx.recyclerview.widget.RecyclerView
-          class NotificationAdapter : RecyclerView.Adapter<NotificationAdapter.ViewHolder>() {
-              private var items = listOf<Map<String, String>>()
-              fun submitList(list: List<Map<String, String>>) { items = list; notifyDataSetChanged() }
-              class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
-                  val app: TextView = view.findViewById(R.id.tvNotifApp)
-                  val title: TextView = view.findViewById(R.id.tvNotifTitle)
-                  val text: TextView = view.findViewById(R.id.tvNotifText)
-                  val time: TextView = view.findViewById(R.id.tvNotifTime)
-              }
-              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-                  ViewHolder(LayoutInflater.from(parent.context).inflate(R.layout.item_notification, parent, false))
-              override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-                  val item = items[position]
-                  holder.app.text = item["app"]
-                  holder.title.text = item["title"]
-                  holder.text.text = item["text"]
-                  holder.time.text = item["time"]
-              }
-              override fun getItemCount() = items.size
-          }
-          EOF
-
-      - name: Build APKs
-        run: gradle :app-server:assembleDebug :app-client:assembleDebug
-
-      - name: Upload APKs
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: apks
-          path: |
-            app-server/build/outputs/apk/debug/app-server-debug.apk
-            app-client/build/outputs/apk/debug/app-client-debug.apk
+          name: apk
+          path: app-server/build/outputs/apk/debug/app-server-debug.apk
